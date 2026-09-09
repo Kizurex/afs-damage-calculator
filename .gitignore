@@ -1,17 +1,7 @@
-# ---------------------------------------------------------------------------
-# Only the website itself is tracked: index.html, styles.css, js/, data/gamedata.js,
-# data/changelog.js and assets/. Everything below stays local to the maintainer.
-# ---------------------------------------------------------------------------
-
-# Tooling that generates the site data from the game source
-scripts/
-package.json
-package-lock.json
-
 # Extracted game data and maintainer notes
 build/
-data/runtime/
 data/*.json
+data/runtime/
 MAINTAINERS.md
 
 # Node
@@ -20,13 +10,18 @@ npm-debug.log*
 yarn-error.log*
 
 # OS and editor files
-.DS_Store
-Thumbs.db
-desktop.ini
-*.swp
-*.swo
-*.log
-*.tmp
 .cache/
-.vscode/
+.DS_Store
 .idea/
+.vscode/
+*.log
+*.swo
+*.swp
+*.tmp
+desktop.ini
+Thumbs.db
+
+# Tooling that generates the site data from the game source
+package-lock.json
+package.json
+scripts/
