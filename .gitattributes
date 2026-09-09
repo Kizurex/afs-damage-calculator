@@ -22,3 +22,5 @@
 
 # Generated data: collapse in diffs and skip language statistics
 data/gamedata.js linguist-generated=true -diff
+data/changelog.js linguist-generated=true -diff
+assets/icons/manifest.json linguist-generated=true
