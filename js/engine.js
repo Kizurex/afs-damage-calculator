@@ -11,10 +11,16 @@
 		Reiatsu: "ReiatsuDamage",
 		Stands: "StandDamage",
 	};
+	const SPECIAL_TYPES = ["Authorities", "Bloodlines", "BreathingStyles", "CursedTechniques", "Fruits", "Kagunes", "Permanent", "Reiatsu", "Stands"];
+	const CUSTOM_ID = "__custom";
 
 	const MOVE_BLEED = { damageBoostPerStack: 0.02, decayInterval: 2, detonationMultiplier: 0.5, maxStacks: 30 };
 	const HARDEN_FIST = 1.15;
 	const JUGGERNAUT_MULTIPLIER = 1.5;
+	const MOVE_OVERRIDE_FIELDS = [
+		"bossDamage", "playerDamage", "damageMultiplier", "baseCooldown", "tickCount",
+		"activationTillFirstHitbox", "activationTillEndlagEnd", "activationTillCooldownStart", "durationSeconds", "dotMultiplier",
+	];
 
 	function num(value, fallback) {
 		return typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -23,15 +29,19 @@
 	function defaultLoadout() {
 		return {
 			mode: "boss",
+			stacking: "multiplicative",
 			stats: { Strength: 1e6, Chakra: 1e6, Sword: 1e6 },
 			statLimits: { Strength: 100, Chakra: 100, Sword: 100 },
 			championId: "",
 			traitId: "",
 			traitTier: 0,
+			customTraitBoost: 0,
 			titleId: "",
 			accessories: {},
 			transformationId: "",
 			standId: "",
+			custom: { champion: null, accessory: null, title: null, transformation: null },
+			moveOverrides: {},
 			attackerHealthPercent: 100,
 			targetHealthPercent: 100,
 			targetMaxHealth: 1000,
@@ -59,10 +69,83 @@
 		};
 	}
 
-	function getMoveConfig(data, powerId, standId) {
+	function moveKey(powerId, standId) {
+		return standId ? `${powerId}@${standId}` : powerId;
+	}
+
+	function hasOverrides(override) {
+		return !!override && MOVE_OVERRIDE_FIELDS.some((field) => typeof override[field] === "number");
+	}
+
+	function cloneRuntime(runtime) {
+		if (!runtime) return null;
+		return {
+			activationTillFirstHitbox: runtime.activationTillFirstHitbox ?? null,
+			activationTillEndlagEnd: runtime.activationTillEndlagEnd ?? null,
+			activationTillCooldownStart: runtime.activationTillCooldownStart ?? null,
+			durationSeconds: runtime.durationSeconds ?? null,
+			hits: (runtime.hits || []).map((hit) => Object.assign({}, hit)),
+			statuses: (runtime.statuses || []).map((status) => Object.assign({}, status, { dot: status.dot ? Object.assign({}, status.dot) : status.dot })),
+		};
+	}
+
+	function applyMoveOverride(config, override) {
+		if (!hasOverrides(override)) return config;
+		const original = {
+			bossDamage: config.bossDamage ?? null,
+			playerDamage: config.playerDamage ?? null,
+			damageMultiplier: config.damageMultiplier ?? null,
+			baseCooldown: config.baseCooldown ?? null,
+			tickCount: config.runtime ? (config.runtime.hits || []).reduce((sum, hit) => sum + num(hit.count, 0), 0) : null,
+			activationTillFirstHitbox: config.runtime ? config.runtime.activationTillFirstHitbox ?? null : null,
+			activationTillEndlagEnd: config.runtime ? config.runtime.activationTillEndlagEnd ?? null : null,
+			activationTillCooldownStart: config.runtime ? config.runtime.activationTillCooldownStart ?? null : null,
+			durationSeconds: config.runtime ? config.runtime.durationSeconds ?? null : null,
+			dotMultiplier: 1,
+		};
+		for (const field of ["bossDamage", "playerDamage", "damageMultiplier", "baseCooldown"]) {
+			if (typeof override[field] === "number") config[field] = override[field];
+		}
+		const runtime = cloneRuntime(config.runtime) || { activationTillFirstHitbox: null, activationTillEndlagEnd: null, activationTillCooldownStart: null, durationSeconds: null, hits: [], statuses: [] };
+		for (const field of ["activationTillFirstHitbox", "activationTillEndlagEnd", "activationTillCooldownStart", "durationSeconds"]) {
+			if (typeof override[field] === "number") runtime[field] = override[field];
+		}
+		if (typeof override.tickCount === "number") {
+			const damaging = runtime.hits.filter((hit) => hit.damage && hit.damage.basis !== "none");
+			if (damaging.length === 0) {
+				runtime.hits.push({ label: "Hit", count: override.tickCount, damage: { basis: "power", multiplier: 1 }, hitbox: null });
+			} else {
+				const currentTotal = damaging.reduce((sum, hit) => sum + num(hit.count, 0), 0);
+				if (damaging.length === 1 || currentTotal === 0) {
+					damaging[0].count = override.tickCount;
+				} else {
+					let remaining = override.tickCount;
+					damaging.forEach((hit, index) => {
+						if (index === damaging.length - 1) hit.count = Math.max(0, remaining);
+						else {
+							const share = Math.round((num(hit.count, 0) / currentTotal) * override.tickCount);
+							hit.count = share;
+							remaining -= share;
+						}
+					});
+				}
+			}
+		}
+		if (typeof override.dotMultiplier === "number") {
+			for (const status of runtime.statuses) {
+				if (status.dot) status.dot.totalMultiplier = num(status.dot.totalMultiplier, 0) * override.dotMultiplier;
+			}
+		}
+		config.runtime = runtime;
+		config.override = override;
+		config.original = original;
+		return config;
+	}
+
+	function getMoveConfig(data, powerId, standId, loadout) {
 		const base = data.powers[powerId];
 		if (!base) return null;
-		const merged = Object.assign({}, base, { Properties: Object.assign({}, base.Properties || {}) });
+		const merged = Object.assign({}, base);
 		merged.overrideSource = null;
 		if (standId) {
 			const stand = data.specials[standId];
@@ -70,18 +153,57 @@
 			if (override) {
 				for (const [key, value] of Object.entries(override)) {
 					if (key === "Properties" && value && typeof value === "object") {
-						Object.assign(merged.Properties, value);
 						for (const propKey of ["baseCooldown", "bossDamage", "playerDamage", "damageMultiplier"]) {
 							if (typeof value[propKey] === "number") merged[propKey] = value[propKey];
 						}
-					} else {
+					} else if (typeof value === "number") {
 						merged[key] = value;
 					}
 				}
 				merged.overrideSource = standId;
 			}
 		}
+		merged.key = moveKey(powerId, standId || null);
+		merged.standId = standId || null;
+		if (loadout && loadout.moveOverrides) applyMoveOverride(merged, loadout.moveOverrides[merged.key]);
 		return merged;
+	}
+
+	function getChampion(data, loadout) {
+		if (!loadout.championId) return null;
+		if (loadout.championId === CUSTOM_ID) {
+			return { id: CUSTOM_ID, displayName: "Custom champion", Boosts: (loadout.custom && loadout.custom.champion) || {}, isCustom: true };
+		}
+		return data.champions[loadout.championId] || null;
+	}
+
+	function getTitle(data, loadout) {
+		if (!loadout.titleId) return null;
+		if (loadout.titleId === CUSTOM_ID) {
+			return { id: CUSTOM_ID, displayName: "Custom title", effects: (loadout.custom && loadout.custom.title) || {}, isCustom: true };
+		}
+		return data.titles[loadout.titleId] || null;
+	}
+
+	function getTransformation(data, loadout) {
+		if (!loadout.transformationId) return null;
+		if (loadout.transformationId === CUSTOM_ID) {
+			return { id: CUSTOM_ID, displayName: "Custom transformation", Perks: (loadout.custom && loadout.custom.transformation) || {}, isCustom: true };
+		}
+		return data.transformations[loadout.transformationId] || null;
+	}
+
+	function getAccessoryConfigs(data, loadout) {
+		const list = [];
+		for (const id of Object.values(loadout.accessories || {})) {
+			if (!id) continue;
+			if (id === CUSTOM_ID) {
+				list.push({ id: CUSTOM_ID, displayName: "Custom accessory", Boosts: (loadout.custom && loadout.custom.accessory) || {}, isCustom: true });
+			} else if (data.accessories[id]) {
+				list.push(data.accessories[id]);
+			}
+		}
+		return list;
 	}
 
 	function damageTypesMatch(damageTypes, move) {
@@ -91,6 +213,7 @@
 
 	function traitDamageBoost(data, loadout) {
 		if (!loadout.traitId) return 0;
+		if (loadout.traitId === CUSTOM_ID) return num(loadout.customTraitBoost, 0) / 100;
 		const trait = data.traits[loadout.traitId];
 		if (!trait) return 0;
 		const tier = trait.tiers[loadout.traitTier] || trait.tiers[0];
@@ -104,13 +227,12 @@
 
 	function accessoryBoosts(data, loadout) {
 		const merged = { Damage: {}, SpecialDamage: {}, BossDamage: 0, PvpDamage: 0, MissingHealthDamageBoost: null, ids: [] };
-		for (const id of Object.values(loadout.accessories || {})) {
-			const config = id && data.accessories[id];
-			if (!config || !config.Boosts) continue;
-			merged.ids.push(id);
+		for (const config of getAccessoryConfigs(data, loadout)) {
+			if (!config.Boosts) continue;
+			merged.ids.push(config.id);
 			const boosts = config.Boosts;
-			for (const [key, value] of Object.entries(boosts.Damage || {})) merged.Damage[key] = (merged.Damage[key] || 0) + value;
-			for (const [key, value] of Object.entries(boosts.SpecialDamage || {})) merged.SpecialDamage[key] = (merged.SpecialDamage[key] || 0) + value;
+			for (const [key, value] of Object.entries(boosts.Damage || {})) merged.Damage[key] = (merged.Damage[key] || 0) + num(value, 0);
+			for (const [key, value] of Object.entries(boosts.SpecialDamage || {})) merged.SpecialDamage[key] = (merged.SpecialDamage[key] || 0) + num(value, 0);
 			merged.BossDamage += num(boosts.BossDamage, 0);
 			merged.PvpDamage += num(boosts.PvpDamage, 0);
 			merged.MissingHealthDamageBoost = merged.MissingHealthDamageBoost || boosts.MissingHealthDamageBoost || null;
@@ -127,8 +249,8 @@
 		return 1 + Math.max(boost, 0);
 	}
 
-	function transformationDamageMultiplier(data, loadout, move, champion) {
-		const transformation = loadout.transformationId && data.transformations[loadout.transformationId];
+	function transformationSteps(data, loadout, move, champion) {
+		const transformation = getTransformation(data, loadout);
 		const perks = transformation && transformation.Perks;
 		let multiplier = 1;
 		const steps = [];
@@ -149,143 +271,117 @@
 			multiplier += num(championTransformationBoost.universalDamageBonus, 0);
 			multiplier *= num(championTransformationBoost.universalDamageMultiplier, 1);
 		}
-		if (multiplier !== 1) steps.push({ label: `Transformation damage (${transformation.displayName})`, value: multiplier });
-		let specialMultiplier = 1;
+		if (multiplier !== 1) steps.push({ label: `Transformation damage (${transformation.displayName})`, value: multiplier, source: "transformation" });
 		if (perks && perks.specialDamageBoost && move.specialType) {
-			const boost = perks.specialDamageBoost[move.specialType];
-			if (typeof boost === "number" && boost !== 0) {
-				specialMultiplier = 1 + boost;
-				steps.push({ label: `Transformation special damage (${move.specialType})`, value: specialMultiplier });
-			}
+			const boost = num(perks.specialDamageBoost[move.specialType], 0);
+			if (boost !== 0) steps.push({ label: `Transformation special damage (${move.specialType})`, value: 1 + boost, source: "transformation" });
 		}
-		return { multiplier: multiplier * specialMultiplier, steps };
+		return steps;
 	}
 
-	function buffMultiplier(data, loadout, move) {
+	function combine(steps, stacking) {
+		let product = 1;
+		let additive = 0;
+		for (const step of steps) {
+			const value = num(step.value, 1);
+			if (step.kind && step.kind !== "bonus") product *= value;
+			else if (stacking === "additive") additive += value - 1;
+			else product *= value;
+		}
+		return product * (1 + additive);
+	}
+
+	function sourceSteps(data, loadout, move) {
 		const steps = [];
-		let multiplier = 1;
-		const champion = loadout.championId ? data.champions[loadout.championId] : null;
+		const champion = getChampion(data, loadout);
 		const boosts = champion ? champion.Boosts || {} : {};
 		const attackerHealthRatio = Math.max(0, Math.min(1, num(loadout.attackerHealthPercent, 100) / 100));
 		const accessories = accessoryBoosts(data, loadout);
+		const title = getTitle(data, loadout);
 
-		function apply(label, value) {
+		function apply(label, value, source) {
 			if (typeof value !== "number" || !Number.isFinite(value) || value === 1) return;
-			multiplier *= value;
-			steps.push({ label, value });
+			steps.push({ label, value, source: source || "champion" });
 		}
 
 		if (champion) {
+			const name = champion.displayName;
 			if (boosts.Damage) {
-				const stat = num(boosts.Damage[move.statType], 0);
-				const special = move.specialType ? num(boosts.Damage[move.specialType], 0) : 0;
-				const any = num(boosts.Damage.Any, 0);
-				apply(`${champion.displayName}: ${move.statType} damage`, 1 + stat);
-				if (move.specialType) apply(`${champion.displayName}: ${move.specialType} damage`, 1 + special);
-				apply(`${champion.displayName}: any damage`, 1 + any);
+				apply(`${name}: ${move.statType} damage`, 1 + num(boosts.Damage[move.statType], 0));
+				if (move.specialType) apply(`${name}: ${move.specialType} damage`, 1 + num(boosts.Damage[move.specialType], 0));
+				apply(`${name}: any damage`, 1 + num(boosts.Damage.Any, 0));
 			}
 			const gated = boosts.HealthGatedDamageBoost;
 			if (gated) {
 				const exempt = gated.exemptPowers && gated.exemptPowers[move.id];
-				if (typeof exempt === "number") {
-					apply(`${champion.displayName}: health-gated boost (exempt move)`, (1 + num(gated.boost, 0)) * (1 + exempt));
-				} else {
-					const boost = attackerHealthRatio < num(gated.threshold, 0) ? num(gated.lowHealthBoost, 0) : num(gated.boost, 0);
-					apply(`${champion.displayName}: health-gated boost`, 1 + boost);
-				}
+				if (typeof exempt === "number") apply(`${name}: health-gated boost (exempt move)`, (1 + num(gated.boost, 0)) * (1 + exempt));
+				else apply(`${name}: health-gated boost`, 1 + (attackerHealthRatio < num(gated.threshold, 0) ? num(gated.lowHealthBoost, 0) : num(gated.boost, 0)));
 			}
 			const stacking = boosts.InCombatStacking;
 			if (stacking && loadout.combatStacks > 0) {
-				apply(`${champion.displayName}: combat stacks (${Math.min(loadout.combatStacks, stacking.maxStacks)})`, 1 + Math.min(loadout.combatStacks, num(stacking.maxStacks, 0)) * num(stacking.damageBoostPerStack, 0));
+				const stacks = Math.min(loadout.combatStacks, num(stacking.maxStacks, 0));
+				apply(`${name}: combat stacks (${stacks})`, 1 + stacks * num(stacking.damageBoostPerStack, 0));
 			}
-			if (boosts.ChakraMeltdown && loadout.chakraMeltdown && (move.statType === "Chakra" || move.specialType === "Chakra")) {
-				apply(`${champion.displayName}: chakra meltdown`, 1 + num(boosts.ChakraMeltdown.damageBoost, 0));
-			}
+			if (boosts.ChakraMeltdown && loadout.chakraMeltdown && (move.statType === "Chakra" || move.specialType === "Chakra")) apply(`${name}: chakra meltdown`, 1 + num(boosts.ChakraMeltdown.damageBoost, 0));
 			const moveModifier = boosts.MoveModifiers && boosts.MoveModifiers[move.id];
-			if (moveModifier && typeof moveModifier.damageBoost === "number") {
-				apply(`${champion.displayName}: ${move.displayName} boost`, 1 + moveModifier.damageBoost);
-			}
-			if (moveModifier && typeof moveModifier.shrineDamageBoost === "number" && loadout.shrineActive) {
-				apply(`${champion.displayName}: shrine boost`, 1 + moveModifier.shrineDamageBoost);
-			}
-			const specialModifiers = boosts.SpecialModifiers;
-			if (specialModifiers) {
-				for (const [specialId, modifier] of Object.entries(specialModifiers)) {
-					const owners = (move.usedBy || []).map((u) => u.specialId);
-					if (owners.includes(specialId) && modifier && typeof modifier.damageBoost === "number" && modifier.damageBoost > 0) {
-						apply(`${champion.displayName}: ${specialId} special boost`, 1 + modifier.damageBoost);
-					}
+			if (moveModifier && typeof moveModifier.damageBoost === "number") apply(`${name}: ${move.displayName} boost`, 1 + moveModifier.damageBoost);
+			if (moveModifier && typeof moveModifier.shrineDamageBoost === "number" && loadout.shrineActive) apply(`${name}: shrine boost`, 1 + moveModifier.shrineDamageBoost);
+			if (boosts.SpecialModifiers) {
+				const owners = (move.usedBy || []).map((u) => u.specialId);
+				for (const [specialId, modifier] of Object.entries(boosts.SpecialModifiers)) {
+					if (owners.includes(specialId) && modifier && num(modifier.damageBoost, 0) > 0) apply(`${name}: ${specialId} special boost`, 1 + modifier.damageBoost);
 				}
 			}
 			const traitBoost = traitDamageBoost(data, loadout);
-			if (traitBoost > 0 && loadout.traitId !== "Berserker") apply(`Trait ${loadout.traitId} damage`, 1 + traitBoost);
+			if (traitBoost > 0 && loadout.traitId !== "Berserker") apply(`Trait ${loadout.traitId === CUSTOM_ID ? "(custom)" : loadout.traitId} damage`, 1 + traitBoost, "trait");
 		}
 
 		if (accessories.ids.length > 0) {
-			apply("Accessories: stat damage", 1 + num(accessories.Damage[move.statType], 0));
-			if (move.specialType) apply("Accessories: special-type damage", 1 + num(accessories.Damage[move.specialType], 0));
-			apply("Accessories: any damage", 1 + num(accessories.Damage.Any, 0));
+			apply("Accessories: stat damage", 1 + num(accessories.Damage[move.statType], 0), "accessory");
+			if (move.specialType) apply("Accessories: special-type damage", 1 + num(accessories.Damage[move.specialType], 0), "accessory");
+			apply("Accessories: any damage", 1 + num(accessories.Damage.Any, 0), "accessory");
 			for (const owner of move.usedBy || []) {
 				const boost = accessories.SpecialDamage[owner.specialId];
-				if (typeof boost === "number") apply(`Accessories: ${owner.specialId} damage`, 1 + boost);
+				if (typeof boost === "number") apply(`Accessories: ${owner.specialId} damage`, 1 + boost, "accessory");
 			}
 		}
 
-		if (loadout.partyDamageBoost > 0) apply("Party damage boost", 1 + loadout.partyDamageBoost / 100);
+		if (loadout.partyDamageBoost > 0) apply("Party damage boost", 1 + loadout.partyDamageBoost / 100, "party");
 
 		if (loadout.mode !== "duel") {
-			const transformation = transformationDamageMultiplier(data, loadout, move, champion);
-			for (const step of transformation.steps) steps.push(step);
-			multiplier *= transformation.multiplier;
+			for (const step of transformationSteps(data, loadout, move, champion)) steps.push(step);
 		}
+		if (move.statType === "Strength" && loadout.hardenFist) apply("Harden Fist", HARDEN_FIST, "buff");
 
-		if (move.statType === "Strength" && loadout.hardenFist) apply("Harden Fist", HARDEN_FIST);
-
-		if (champion && boosts.LowHealthDamageBoost && damageTypesMatch(boosts.LowHealthDamageBoost.damageTypes, move)) {
-			if (attackerHealthRatio <= num(boosts.LowHealthDamageBoost.threshold, 0)) {
-				apply(`${champion.displayName}: low health damage`, 1 + num(boosts.LowHealthDamageBoost.boost, 0));
+		if (champion) {
+			const name = champion.displayName;
+			if (boosts.LowHealthDamageBoost && damageTypesMatch(boosts.LowHealthDamageBoost.damageTypes, move) && attackerHealthRatio <= num(boosts.LowHealthDamageBoost.threshold, 0)) {
+				apply(`${name}: low health damage`, 1 + num(boosts.LowHealthDamageBoost.boost, 0));
 			}
+			if (boosts.LowHealthBerserker && loadout.berserkerActive && damageTypesMatch(boosts.LowHealthBerserker.damageTypes, move)) apply(`${name}: berserker`, 1 + num(boosts.LowHealthBerserker.damageBoost, 0));
+			if (boosts.DaytimeBoost && loadout.daytime && damageTypesMatch(boosts.DaytimeBoost.damageTypes, move)) apply(`${name}: daytime`, 1 + num(boosts.DaytimeBoost.damageBoost, 0));
+			apply(`${name}: missing health`, missingHealthMultiplier(boosts.MissingHealthDamageBoost, move, attackerHealthRatio));
+			if (boosts.DamageStackOnHit && loadout.hitStacks > 0) {
+				const stacks = Math.min(loadout.hitStacks, num(boosts.DamageStackOnHit.maxStacks, loadout.hitStacks));
+				apply(`${name}: hit stacks (${stacks})`, 1 + num(boosts.DamageStackOnHit.boostPerStack, 0) * stacks);
+			}
+			if (boosts.NirvanasBlessing && loadout.nirvana) apply(`${name}: Nirvana's blessing`, 1 + num(boosts.NirvanasBlessing.damageBoost, 0));
 		}
-		if (champion && boosts.LowHealthBerserker && loadout.berserkerActive && damageTypesMatch(boosts.LowHealthBerserker.damageTypes, move)) {
-			apply(`${champion.displayName}: berserker`, 1 + num(boosts.LowHealthBerserker.damageBoost, 0));
-		}
-		if (champion && boosts.DaytimeBoost && loadout.daytime && damageTypesMatch(boosts.DaytimeBoost.damageTypes, move)) {
-			apply(`${champion.displayName}: daytime`, 1 + num(boosts.DaytimeBoost.damageBoost, 0));
-		}
-		if (champion) apply(`${champion.displayName}: missing health`, missingHealthMultiplier(boosts.MissingHealthDamageBoost, move, attackerHealthRatio));
-		apply("Accessories: missing health", missingHealthMultiplier(accessories.MissingHealthDamageBoost, move, attackerHealthRatio));
-		if (champion && boosts.DamageStackOnHit && loadout.hitStacks > 0) {
-			const stacks = Math.min(loadout.hitStacks, num(boosts.DamageStackOnHit.maxStacks, loadout.hitStacks));
-			apply(`${champion.displayName}: hit stacks (${stacks})`, 1 + num(boosts.DamageStackOnHit.boostPerStack, 0) * stacks);
-		}
-		if (champion && boosts.NirvanasBlessing && loadout.nirvana) {
-			apply(`${champion.displayName}: Nirvana's blessing`, 1 + num(boosts.NirvanasBlessing.damageBoost, 0));
+		apply("Accessories: missing health", missingHealthMultiplier(accessories.MissingHealthDamageBoost, move, attackerHealthRatio), "accessory");
+
+		if (title) {
+			const statEffect = STAT_TITLE_EFFECT[move.statType];
+			if (statEffect && typeof title.effects[statEffect] === "number") apply(`Title ${title.displayName}: ${move.statType} damage`, title.effects[statEffect], "title");
+			const specialEffect = SPECIAL_TITLE_EFFECT[move.specialType];
+			if (specialEffect && typeof title.effects[specialEffect] === "number") apply(`Title ${title.displayName}: ${move.specialType} damage`, title.effects[specialEffect], "title");
 		}
 
-		return { multiplier, steps, champion, boosts, accessories, attackerHealthRatio };
-	}
-
-	function titleMultiplier(data, loadout, move) {
-		const title = loadout.titleId && data.titles[loadout.titleId];
-		if (!title) return { multiplier: 1, steps: [] };
-		const steps = [];
-		let multiplier = 1;
-		const statEffect = STAT_TITLE_EFFECT[move.statType];
-		if (statEffect && typeof title.effects[statEffect] === "number") {
-			multiplier *= title.effects[statEffect];
-			steps.push({ label: `Title ${title.displayName}: ${move.statType} damage`, value: title.effects[statEffect] });
-		}
-		const specialEffect = SPECIAL_TITLE_EFFECT[move.specialType];
-		if (specialEffect && typeof title.effects[specialEffect] === "number") {
-			multiplier *= title.effects[specialEffect];
-			steps.push({ label: `Title ${title.displayName}: ${move.specialType} damage`, value: title.effects[specialEffect] });
-		}
-		return { multiplier, steps, title };
+		return { steps, champion, boosts, accessories, title, attackerHealthRatio };
 	}
 
 	function titleEffect(data, loadout, effect) {
-		const title = loadout.titleId && data.titles[loadout.titleId];
-		if (!title) return 1;
+		const title = getTitle(data, loadout);
+		if (!title || !title.effects) return 1;
 		return typeof title.effects[effect] === "number" ? title.effects[effect] : 1;
 	}
 
@@ -293,151 +389,115 @@
 		const config = boosts && boosts.CriticalHit;
 		if (!config || loadout.critMode === "none") return { multiplier: 1, label: null };
 		const typeMatch = damageTypesMatch(config.damageTypes, move);
-		const specialMatch = config.specialIds && Object.keys(config.specialIds).length > 0
-			? (move.usedBy || []).some((u) => config.specialIds[u.specialId])
-			: false;
+		const specialMatch = config.specialIds && Object.keys(config.specialIds).length > 0 ? (move.usedBy || []).some((u) => config.specialIds[u.specialId]) : false;
 		if (!typeMatch && !specialMatch) return { multiplier: 1, label: null };
 		let multiplier = num(config.multiplier, 1);
-		if (targetHealthRatio < num(config.lowHealthThreshold, 0)) {
-			multiplier *= 1 + Math.min(num(config.lowHealthCriticalBonus, 0), num(config.lowHealthMaxBonus, 0));
-		}
+		if (targetHealthRatio < num(config.lowHealthThreshold, 0)) multiplier *= 1 + Math.min(num(config.lowHealthCriticalBonus, 0), num(config.lowHealthMaxBonus, 0));
 		if (loadout.critMode === "always") return { multiplier, label: `Critical hit (${config.multiplier}x)` };
 		const chance = Math.min(1, num(config.chance, 0) + (loadout.critCombatBonus ? num(config.combatChanceBonus, 0) : 0));
-		const expected = 1 + chance * (multiplier - 1);
-		return { multiplier: expected, label: `Critical hit (expected, ${Math.round(chance * 100)}% chance)` };
+		return { multiplier: 1 + chance * (multiplier - 1), label: `Critical hit (expected, ${Math.round(chance * 100)}% chance)` };
 	}
 
-	function baseDamage(data, loadout, move, basis, hitMultiplier) {
-		const buff = buffMultiplier(data, loadout, move);
-		const title = titleMultiplier(data, loadout, move);
+	function baseValue(data, loadout, move, basis, hitMultiplier) {
 		const steps = [];
-		let value = 0;
 		const mode = loadout.mode;
-
 		if (mode === "duel") {
-			value = num(move.playerDamage, 0);
-			steps.push({ label: "PlayerDmg (duel / tournament)", value });
-			return { value, steps, buff, title };
+			const value = num(move.playerDamage, 0);
+			steps.push({ label: "PlayerDmg (duel / tournament)", value, kind: "base" });
+			return { value, steps, usesSources: false };
 		}
-		if (mode === "boss") {
-			value = num(move.bossDamage, 1);
-			steps.push({ label: "BossDmg", value });
-			for (const step of buff.steps) steps.push(step);
-			for (const step of title.steps) steps.push(step);
-			value *= buff.multiplier * title.multiplier;
-			return { value, steps, buff, title };
-		}
-
-		if (basis === "boss") {
-			value = num(move.bossDamage, 1) * buff.multiplier * title.multiplier;
-			steps.push({ label: "BossDmg", value: num(move.bossDamage, 1) });
-			for (const step of buff.steps) steps.push(step);
-			for (const step of title.steps) steps.push(step);
-			return { value, steps, buff, title };
+		if (mode === "boss" || basis === "boss") {
+			const value = num(move.bossDamage, 1);
+			steps.push({ label: "BossDmg", value, kind: "base" });
+			return { value, steps, usesSources: true };
 		}
 		if (basis === "flat") {
-			value = num(hitMultiplier, 0) * (num(loadout.targetMaxHealth, 1000) / 1000);
-			steps.push({ label: `flat damage per 1000 target HP (${hitMultiplier})`, value });
-			return { value, steps, buff, title, isAbsolute: true };
+			const value = num(hitMultiplier, 0) * (num(loadout.targetMaxHealth, 1000) / 1000);
+			steps.push({ label: `flat damage per 1000 target HP (${hitMultiplier})`, value, kind: "base" });
+			return { value, steps, usesSources: false };
 		}
 		if (basis === "percentMaxHealth") {
-			value = num(hitMultiplier, 0) * num(loadout.targetMaxHealth, 1000);
-			steps.push({ label: `${(hitMultiplier * 100).toFixed(1)}% of target max HP`, value });
-			return { value, steps, buff, title, isAbsolute: true };
+			const value = num(hitMultiplier, 0) * num(loadout.targetMaxHealth, 1000);
+			steps.push({ label: `${(hitMultiplier * 100).toFixed(1)}% of target max HP`, value, kind: "base" });
+			return { value, steps, usesSources: false };
 		}
 		if (basis === "fixed") {
-			value = num(hitMultiplier, 0);
-			steps.push({ label: "fixed damage", value });
-			return { value, steps, buff, title, isAbsolute: true };
+			const value = num(hitMultiplier, 0);
+			steps.push({ label: "fixed damage", value, kind: "base" });
+			return { value, steps, usesSources: false };
 		}
-
 		const statType = move.statType || "Strength";
 		const stat = num(loadout.stats[statType], 0);
 		const limit = Math.max(0, Math.min(100, num(loadout.statLimits[statType], 100))) / 100;
-		value = stat;
-		steps.push({ label: `${statType} stat`, value: stat });
-		if (limit !== 1) {
-			value *= limit;
-			steps.push({ label: `${statType} limit`, value: limit });
-		}
-		for (const step of buff.steps) steps.push(step);
-		value *= buff.multiplier;
 		const powerMultiplier = num(move.damageMultiplier, 1);
-		value *= powerMultiplier;
-		steps.push({ label: "PveDmgMultiplier", value: powerMultiplier });
-		for (const step of title.steps) steps.push(step);
-		value *= title.multiplier;
-		return { value, steps, buff, title };
+		steps.push({ label: `${statType} stat`, value: stat, kind: "base" });
+		if (limit !== 1) steps.push({ label: `${statType} limit`, value: limit, kind: "base" });
+		steps.push({ label: "PveDmgMultiplier", value: powerMultiplier, kind: "base" });
+		return { value: stat * limit * powerMultiplier, steps, usesSources: true };
 	}
 
-	function postMultipliers(data, loadout, move, buff, title, context) {
+	function postSteps(data, loadout, move, sources, context) {
 		const steps = [];
-		let multiplier = 1;
 		const mode = loadout.mode;
-		const boosts = buff.boosts || {};
-		const champion = buff.champion;
+		const boosts = sources.boosts || {};
+		const champion = sources.champion;
+		const name = champion ? champion.displayName : "";
 		const targetHealthRatio = Math.max(0, Math.min(1, num(loadout.targetHealthPercent, 100) / 100));
 		const treatAsBoss = mode === "boss";
 
-		function apply(label, value) {
+		function apply(label, value, kind, source) {
 			if (typeof value !== "number" || !Number.isFinite(value) || value === 1) return;
-			multiplier *= value;
-			steps.push({ label, value });
+			steps.push({ label, value, kind: kind || "bonus", source: source || "champion" });
 		}
 
 		if (mode === "duel") {
-			apply("Accessories: PvP damage", 1 + num(buff.accessories.PvpDamage, 0));
-			if (loadout.pvpJuggernaut) apply("Tournament juggernaut", JUGGERNAUT_MULTIPLIER);
-			if (context.bleedMultiplier) apply(`Bleed stacks (${context.bleedStacks})`, context.bleedMultiplier);
-			if (loadout.targetDamageReduction > 0) apply("Target PvP low-health defense", 1 - loadout.targetDamageReduction / 100);
-			return { multiplier, steps };
+			apply("Accessories: PvP damage", 1 + num(sources.accessories.PvpDamage, 0), "bonus", "accessory");
+			if (loadout.pvpJuggernaut) apply("Tournament juggernaut", JUGGERNAUT_MULTIPLIER, "bonus", "buff");
+			if (context.bleedMultiplier) apply(`Bleed stacks (${context.bleedStacks})`, context.bleedMultiplier, "target");
+			if (loadout.targetDamageReduction > 0) apply("Target PvP low-health defense", 1 - loadout.targetDamageReduction / 100, "reduction");
+			return steps;
 		}
 
-		if (loadout.targetVulnerability > 0) apply("Target vulnerability", 1 + loadout.targetVulnerability / 100);
+		if (loadout.targetVulnerability > 0) apply("Target vulnerability", 1 + loadout.targetVulnerability / 100, "target");
 		const moveModifier = boosts.MoveModifiers && boosts.MoveModifiers[move.id];
 		if (moveModifier && typeof moveModifier.lowTargetHealthDamageBoost === "number" && targetHealthRatio < num(moveModifier.lowTargetHealthThreshold, 0)) {
-			apply(`${champion.displayName}: ${move.displayName} low target health`, 1 + moveModifier.lowTargetHealthDamageBoost);
+			apply(`${name}: ${move.displayName} low target health`, 1 + moveModifier.lowTargetHealthDamageBoost);
 		}
 		const crit = critMultiplier(loadout, boosts, move, targetHealthRatio);
-		if (crit.label) apply(crit.label, crit.multiplier);
-		if (num(loadout.attackerBurnDebuff, 1) !== 1) apply("Attacker burning (intense burn)", loadout.attackerBurnDebuff);
-		if (mode !== "freepvp" && loadout.place === "dimension2") apply("Title: Dimension 2 damage", titleEffect(data, loadout, "Dimension2Damage"));
-		if (loadout.damageBuff > 0) apply("DamageBuff status", 1 + loadout.damageBuff / 100);
+		if (crit.label) apply(crit.label, crit.multiplier, "crit");
+		if (num(loadout.attackerBurnDebuff, 1) !== 1) apply("Attacker burning (intense burn)", loadout.attackerBurnDebuff, "reduction");
+		if (mode !== "freepvp" && loadout.place === "dimension2") apply("Title: Dimension 2 damage", titleEffect(data, loadout, "Dimension2Damage"), "bonus", "title");
+		if (loadout.damageBuff > 0) apply("DamageBuff status", 1 + loadout.damageBuff / 100, "bonus", "buff");
 
 		if (mode === "mob" || mode === "boss") {
-			if (boosts.KillableMobDamage && !treatAsBoss) apply(`${champion.displayName}: killable mob damage`, 1 + boosts.KillableMobDamage);
+			if (boosts.KillableMobDamage && !treatAsBoss) apply(`${name}: killable mob damage`, 1 + boosts.KillableMobDamage);
 			if (boosts.MobDamage) {
 				const damageType = move.statType || move.specialType;
-				apply(`${champion.displayName}: mob damage (${damageType})`, 1 + num(boosts.MobDamage[damageType], 0));
-				if (move.specialType && boosts.MobDamage[move.specialType] && move.statType) {
-					/* server only reads statType or specialType (first truthy), so nothing extra here */
-				}
+				apply(`${name}: mob damage (${damageType})`, 1 + num(boosts.MobDamage[damageType], 0));
 			}
 			const transformationBoost = boosts.TransformationBoost;
-			if (treatAsBoss && transformationBoost && loadout.transformationId && typeof transformationBoost.bossDamage === "number") {
-				apply(`${champion.displayName}: transformation boss damage`, 1 + transformationBoost.bossDamage);
-			}
-			if (treatAsBoss && typeof boosts.BossDamage === "number") apply(`${champion.displayName}: boss damage`, 1 + boosts.BossDamage);
-			if (treatAsBoss && buff.accessories.BossDamage > 0) apply("Accessories: boss damage", 1 + buff.accessories.BossDamage);
+			if (treatAsBoss && transformationBoost && loadout.transformationId && typeof transformationBoost.bossDamage === "number") apply(`${name}: transformation boss damage`, 1 + transformationBoost.bossDamage);
+			if (treatAsBoss && typeof boosts.BossDamage === "number") apply(`${name}: boss damage`, 1 + boosts.BossDamage);
+			if (treatAsBoss && sources.accessories.BossDamage > 0) apply("Accessories: boss damage", 1 + sources.accessories.BossDamage, "bonus", "accessory");
 			const lowTarget = boosts.LowTargetHealthDamageBoost;
-			if (lowTarget && targetHealthRatio < num(lowTarget.threshold, 0)) apply(`${champion.displayName}: low target health`, 1 + num(lowTarget.boost, 0));
-			if (boosts.FrozenTargetDamageBoost && loadout.targetFrozen) apply(`${champion.displayName}: frozen target`, 1 + boosts.FrozenTargetDamageBoost);
-			if (context.bleedMultiplier) apply(`Bleed stacks (${context.bleedStacks})`, context.bleedMultiplier);
-			apply("Title: damage in dungeons", titleEffect(data, loadout, "DamageInDungeons"));
+			if (lowTarget && targetHealthRatio < num(lowTarget.threshold, 0)) apply(`${name}: low target health`, 1 + num(lowTarget.boost, 0));
+			if (boosts.FrozenTargetDamageBoost && loadout.targetFrozen) apply(`${name}: frozen target`, 1 + boosts.FrozenTargetDamageBoost);
+			if (context.bleedMultiplier) apply(`Bleed stacks (${context.bleedStacks})`, context.bleedMultiplier, "target");
+			apply("Title: damage in dungeons", titleEffect(data, loadout, "DamageInDungeons"), "bonus", "title");
 			if (treatAsBoss) {
-				apply("Title: boss damage", titleEffect(data, loadout, "BossDamage"));
-				if (loadout.place === "tower") apply("Title: tower boss damage", titleEffect(data, loadout, "TowerBossDamage"));
+				apply("Title: boss damage", titleEffect(data, loadout, "BossDamage"), "bonus", "title");
+				if (loadout.place === "tower") apply("Title: tower boss damage", titleEffect(data, loadout, "TowerBossDamage"), "bonus", "title");
 			}
-			if (boosts.DungeonDamage && loadout.place === "dungeon") apply(`${champion.displayName}: dungeon damage`, 1 + boosts.DungeonDamage);
-			if (treatAsBoss && loadout.targetBurning && context.burnBossTakenBoost) apply("Burn: boss damage taken", 1 + context.burnBossTakenBoost);
-			return { multiplier, steps };
+			if (boosts.DungeonDamage && loadout.place === "dungeon") apply(`${name}: dungeon damage`, 1 + boosts.DungeonDamage);
+			if (treatAsBoss && loadout.targetBurning && context.burnBossTakenBoost) apply("Burn: boss damage taken", 1 + context.burnBossTakenBoost, "target");
+			return steps;
 		}
 
-		if (loadout.traitId === "Berserker" && loadout.berserkerActive) apply("Berserker trait", 1 + traitDamageBoost(data, loadout));
+		if (loadout.traitId === "Berserker" && loadout.berserkerActive) apply("Berserker trait", 1 + traitDamageBoost(data, loadout), "bonus", "trait");
 		const lowTarget = boosts.LowTargetHealthDamageBoost;
-		if (lowTarget && targetHealthRatio < num(lowTarget.threshold, 0)) apply(`${champion.displayName}: low target health`, 1 + num(lowTarget.boost, 0));
-		if (boosts.FrozenTargetDamageBoost && loadout.targetFrozen) apply(`${champion.displayName}: frozen target`, 1 + boosts.FrozenTargetDamageBoost);
-		if (context.bleedMultiplier) apply(`Bleed stacks (${context.bleedStacks})`, context.bleedMultiplier);
+		if (lowTarget && targetHealthRatio < num(lowTarget.threshold, 0)) apply(`${name}: low target health`, 1 + num(lowTarget.boost, 0));
+		if (boosts.FrozenTargetDamageBoost && loadout.targetFrozen) apply(`${name}: frozen target`, 1 + boosts.FrozenTargetDamageBoost);
+		if (context.bleedMultiplier) apply(`Bleed stacks (${context.bleedStacks})`, context.bleedMultiplier, "target");
 		if (loadout.targetDamageReduction > 0) {
 			let reduction = loadout.targetDamageReduction / 100;
 			const ignore = boosts.IgnoreDamageReduction;
@@ -445,9 +505,9 @@
 			if (typeof ignore === "number") ignoreValue = ignore;
 			else if (ignore && typeof ignore === "object") ignoreValue = num(ignore[move.statType || move.specialType], 0);
 			reduction *= 1 - ignoreValue;
-			apply(`Target damage reduction (${Math.round(reduction * 100)}%)`, 1 - reduction);
+			apply(`Target damage reduction (${Math.round(reduction * 100)}%)`, 1 - reduction, "reduction");
 		}
-		return { multiplier, steps };
+		return steps;
 	}
 
 	function bleedConfigFor(move, boosts) {
@@ -458,12 +518,12 @@
 	}
 
 	function computeMove(data, loadout, move) {
+		const stacking = loadout.stacking === "additive" ? "additive" : "multiplicative";
 		const runtime = move.runtime;
 		const hits = runtime && Array.isArray(runtime.hits) ? runtime.hits : [];
 		const statuses = runtime && Array.isArray(runtime.statuses) ? runtime.statuses : [];
-		const primary = baseDamage(data, loadout, move, "power", 1);
-		const buff = primary.buff;
-		const boosts = buff.boosts || {};
+		const sources = sourceSteps(data, loadout, move);
+		const boosts = sources.boosts || {};
 		const bleed = bleedConfigFor(move, boosts);
 		const burnStatus = statuses.find((s) => s.effect === "Burn" && s.data && typeof s.data.bossDamageTakenBoost === "number");
 		const context = {
@@ -471,7 +531,13 @@
 			bleedMultiplier: bleed && loadout.bleedStacks > 0 ? 1 + Math.min(loadout.bleedStacks, bleed.config.maxStacks) * bleed.config.damageBoostPerStack : 0,
 			burnBossTakenBoost: burnStatus ? burnStatus.data.bossDamageTakenBoost : 0,
 		};
-		const post = postMultipliers(data, loadout, move, buff, primary.title, context);
+		const post = postSteps(data, loadout, move, sources, context);
+		const sourceMultiplier = combine(sources.steps, stacking);
+		const fullBonus = combine(sources.steps.concat(post), stacking);
+		const postOnly = combine(post, stacking);
+
+		const primary = baseValue(data, loadout, move, "power", 1);
+		const perHitFull = primary.value * (primary.usesSources ? fullBonus : postOnly);
 
 		const hitResults = [];
 		let totalHits = 0;
@@ -480,18 +546,15 @@
 			const basis = hit.damage ? hit.damage.basis : "power";
 			if (basis === "none") continue;
 			const count = Math.max(0, num(hit.count, 0));
-			let perHit = 0;
-			let base;
+			let perHit;
 			if (loadout.mode === "duel" || loadout.mode === "boss") {
-				base = baseDamage(data, loadout, move, "power", 1);
-				perHit = base.value;
+				perHit = perHitFull;
 			} else {
 				const multiplier = num(hit.damage && hit.damage.multiplier, 1);
 				const value = basis === "power" ? multiplier : num(hit.damage && hit.damage.value, multiplier);
-				base = baseDamage(data, loadout, move, basis, value);
-				perHit = basis === "power" ? base.value * multiplier : base.value;
+				const base = baseValue(data, loadout, move, basis, value);
+				perHit = base.value * (basis === "power" ? multiplier : 1) * (base.usesSources ? fullBonus : postOnly);
 			}
-			perHit *= post.multiplier;
 			totalHits += count;
 			totalDirect += perHit * count;
 			hitResults.push({ hit, perHit, count, total: perHit * count, basis });
@@ -499,6 +562,7 @@
 
 		const dotResults = [];
 		let totalDot = 0;
+		const statScaled = num(loadout.stats[move.statType || "Strength"], 0) * (Math.max(0, Math.min(100, num(loadout.statLimits[move.statType || "Strength"], 100))) / 100) * num(move.damageMultiplier, 1);
 		for (const status of statuses) {
 			if (!status.dot) continue;
 			if (loadout.mode === "duel" || loadout.mode === "freepvp") {
@@ -506,34 +570,19 @@
 			} else if (status.target === "players") continue;
 			const dot = status.dot;
 			let value = 0;
-			if (dot.basis === "boss") {
-				value = num(move.bossDamage, 1) * buff.multiplier * primary.title.multiplier * num(dot.totalMultiplier, 0);
-			} else if (dot.basis === "power") {
-				const powerValue = baseDamage(data, loadout, move, "power", 1);
-				const statValue = loadout.mode === "duel" || loadout.mode === "boss"
-					? statScaled(data, loadout, move, buff, primary.title)
-					: powerValue.value;
-				value = statValue * num(dot.totalMultiplier, 0);
-			} else if (dot.basis === "flat") {
-				value = num(dot.totalMultiplier, 0) * (num(loadout.targetMaxHealth, 1000) / 1000);
-			} else if (dot.basis === "percentMaxHealth") {
-				value = num(dot.totalMultiplier, 0) * num(loadout.targetMaxHealth, 1000);
-			} else if (dot.basis === "fixed") {
-				value = num(dot.totalMultiplier, 0);
-			}
-			if (loadout.mode === "boss" && loadout.targetBurning && status.effect === "Burn" && status.data && typeof status.data.bossDamageTakenBoost === "number") {
-				value *= 1 + status.data.bossDamageTakenBoost;
-			}
+			if (dot.basis === "boss") value = num(move.bossDamage, 1) * sourceMultiplier * num(dot.totalMultiplier, 0);
+			else if (dot.basis === "power") value = statScaled * sourceMultiplier * num(dot.totalMultiplier, 0);
+			else if (dot.basis === "flat") value = num(dot.totalMultiplier, 0) * (num(loadout.targetMaxHealth, 1000) / 1000);
+			else if (dot.basis === "percentMaxHealth") value = num(dot.totalMultiplier, 0) * num(loadout.targetMaxHealth, 1000);
+			else if (dot.basis === "fixed") value = num(dot.totalMultiplier, 0);
+			if (loadout.mode === "boss" && loadout.targetBurning && status.effect === "Burn" && status.data && typeof status.data.bossDamageTakenBoost === "number") value *= 1 + status.data.bossDamageTakenBoost;
 			dotResults.push({ status, total: value, ticks: num(dot.ticks, 1), duration: num(status.duration, 0) });
 			totalDot += value;
 		}
 
 		let detonation = 0;
 		if (bleed && loadout.includeBleedDetonation && totalHits > 0) {
-			const stacksAdded = totalHits * bleed.stacksPerHit;
-			if (loadout.bleedStacks + stacksAdded > bleed.config.maxStacks) {
-				detonation = totalDirect * bleed.config.detonationMultiplier;
-			}
+			if (loadout.bleedStacks + totalHits * bleed.stacksPerHit > bleed.config.maxStacks) detonation = totalDirect * bleed.config.detonationMultiplier;
 		}
 
 		const total = totalDirect + (loadout.includeDot ? totalDot : 0) + detonation;
@@ -545,10 +594,13 @@
 		return {
 			move,
 			runtime,
+			stacking,
 			perHitBase: primary.value,
+			perHitFull,
 			baseSteps: primary.steps,
-			postSteps: post.steps,
-			postMultiplier: post.multiplier,
+			sourceSteps: sources.steps,
+			postSteps: post,
+			bonusMultiplier: primary.usesSources ? fullBonus : postOnly,
 			hits: hitResults,
 			totalHits,
 			totalDirect,
@@ -563,15 +615,8 @@
 			dps: endlag ? total / Math.max(endlag, 0.05) : null,
 			damagePerCycle: cycleTime > 0 ? total / cycleTime : null,
 			bleed,
-			confidence: runtime ? runtime.confidence : "none",
+			isOverridden: !!move.override,
 		};
-	}
-
-	function statScaled(data, loadout, move, buff, title) {
-		const statType = move.statType || "Strength";
-		const stat = num(loadout.stats[statType], 0);
-		const limit = Math.max(0, Math.min(100, num(loadout.statLimits[statType], 100))) / 100;
-		return stat * limit * buff.multiplier * num(move.damageMultiplier, 1) * title.multiplier;
 	}
 
 	function simulateCombo(data, loadout, entries) {
@@ -583,11 +628,11 @@
 		let bleedDamagePool = 0;
 		let lastBleedAt = null;
 		for (const entry of entries) {
-			const move = getMoveConfig(data, entry.powerId, entry.standId || loadout.standId);
+			const move = getMoveConfig(data, entry.powerId, entry.standId || loadout.standId, loadout);
 			if (!move) continue;
 			const localLoadout = Object.assign({}, loadout, { bleedStacks });
 			const result = computeMove(data, localLoadout, move);
-			const readyAt = cooldownReady[move.id] || 0;
+			const readyAt = cooldownReady[move.key] || 0;
 			const waitForCooldown = Math.max(0, readyAt - time);
 			const startAt = time + waitForCooldown;
 			const endlag = result.endlag !== null ? result.endlag : 0;
@@ -596,13 +641,11 @@
 			if (result.bleed) {
 				const config = result.bleed.config;
 				if (lastBleedAt !== null && startAt - lastBleedAt >= config.decayInterval) {
-					const decayed = Math.floor((startAt - lastBleedAt) / config.decayInterval);
-					bleedStacks = Math.max(0, bleedStacks - decayed);
+					bleedStacks = Math.max(0, bleedStacks - Math.floor((startAt - lastBleedAt) / config.decayInterval));
 					if (bleedStacks === 0) bleedDamagePool = 0;
 				}
-				const stacksAdded = result.totalHits * result.bleed.stacksPerHit;
 				bleedDamagePool += result.totalDirect;
-				bleedStacks += stacksAdded;
+				bleedStacks += result.totalHits * result.bleed.stacksPerHit;
 				lastBleedAt = startAt;
 				if (bleedStacks > config.maxStacks) {
 					detonation = bleedDamagePool * config.detonationMultiplier;
@@ -612,19 +655,8 @@
 			}
 			const damage = result.totalDirect + (loadout.includeDot ? result.totalDot : 0) + detonation;
 			totalDamage += damage;
-			rows.push({
-				entry,
-				move,
-				result,
-				startAt,
-				waitForCooldown,
-				endAt: startAt + endlag,
-				damage,
-				detonation,
-				cumulative: totalDamage,
-				bleedStacksAfter: bleedStacks,
-			});
-			cooldownReady[move.id] = startAt + cooldownStart + result.cooldown;
+			rows.push({ entry, move, result, startAt, waitForCooldown, endAt: startAt + endlag, damage, detonation, cumulative: totalDamage, bleedStacksAfter: bleedStacks });
+			cooldownReady[move.key] = startAt + cooldownStart + result.cooldown;
 			time = startAt + endlag;
 		}
 		return { rows, totalDamage, totalTime: time, dps: time > 0 ? totalDamage / time : null };
@@ -642,6 +674,8 @@
 			type: move.Transformation ? "Transformation" : hits.length ? "Attack" : "Utility",
 			damageType: move.statType,
 			specialType: move.specialType || null,
+			stand: move.standId || null,
+			overridden: !!move.override,
 			passives: {},
 			attack: {
 				BossDmg: move.bossDamage ?? null,
@@ -666,12 +700,20 @@
 	}
 
 	window.Engine = {
+		CUSTOM_ID,
+		SPECIAL_TYPES,
+		MOVE_OVERRIDE_FIELDS,
+		MOVE_BLEED,
 		defaultLoadout,
+		moveKey,
+		hasOverrides,
 		getMoveConfig,
+		getChampion,
+		getTitle,
+		getTransformation,
+		getAccessoryConfigs,
 		computeMove,
 		simulateCombo,
 		exportMoveJson,
-		buffMultiplier,
-		MOVE_BLEED,
 	};
 })();
