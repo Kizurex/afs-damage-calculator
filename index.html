@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<meta name="color-scheme" content="light dark" />
+	<meta name="description" content="Damage calculator for Anime Fighting Simulator: pick your moves, set your loadout and see exact damage, ticks, timings and combos." />
+	<title>AFS Damage Calculator</title>
+	<script>
+		(function () {
+			var stored = null;
+			try { stored = localStorage.getItem("afs-damage-calculator-theme"); } catch (err) {}
+			var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+			document.documentElement.setAttribute("data-theme", stored || (prefersDark ? "dark" : "light"));
+		})();
+	</script>
+	<link rel="preconnect" href="https://fonts.googleapis.com" />
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" />
+	<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+	<header class="topbar">
+		<div class="brand">
+			<div class="brand-mark" aria-hidden="true">AFS</div>
+			<div class="brand-text">
+				<span class="brand-title">Damage Calculator</span>
+				<span class="brand-sub" id="data-stamp"></span>
+			</div>
+		</div>
+		<nav class="tabs" id="main-tabs" aria-label="Sections">
+			<button class="tab active" data-tab="move">Move</button>
+			<button class="tab" data-tab="compare">Compare</button>
+			<button class="tab" data-tab="combo">Combo</button>
+			<button class="tab" data-tab="help">Guide</button>
+		</nav>
+		<div class="topbar-actions">
+			<button id="share-button" class="ghost" title="Copy a link that restores this loadout and combo">Share link</button>
+			<button id="reset-button" class="ghost" title="Reset loadout and combo">Reset</button>
+			<label class="theme-switch" title="Switch between light and dark theme">
+				<input type="checkbox" id="theme-toggle" aria-label="Dark theme" />
+				<span class="track"><span class="thumb"></span></span>
+			</label>
+		</div>
+	</header>
+
+	<div class="layout">
+		<aside class="sidebar">
+			<input id="search" type="search" placeholder="Search moves and specials…" autocomplete="off" />
+			<div class="filters">
+				<label><input type="checkbox" id="filter-hide-utility" /> Hide non-damaging moves</label>
+			</div>
+			<div id="move-tree" class="tree"></div>
+		</aside>
+
+		<main class="content">
+			<section id="panel-move" class="panel active"></section>
+			<section id="panel-compare" class="panel"></section>
+			<section id="panel-combo" class="panel"></section>
+			<section id="panel-help" class="panel"></section>
+		</main>
+
+		<aside class="loadout" id="loadout"></aside>
+	</div>
+
+	<div id="toast" class="toast" hidden></div>
+
+	<script src="data/gamedata.js"></script>
+	<script src="js/engine.js"></script>
+	<script src="js/app.js"></script>
+</body>
+</html>

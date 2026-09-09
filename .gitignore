@@ -1,0 +1,18 @@
+# OS and editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Node tooling (the site itself has no build step)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Local scratch
+*.log
+*.tmp
+.cache/
