@@ -9,4 +9,4 @@ and the move card lets you try hypothetical values, custom boosts and multiplica
 additive bonus stacking before they go into the game. **Diff** lists what you changed
 and every value change between site updates. The **Guide** tab explains each field.
 
-The site is static: open `index.html` in a browser, or use the GitHub Pages deployment.
+The site is static: open `index.html` in a browser, or use https://kizurex.github.io/afs-damage-calculator/.
