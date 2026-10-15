@@ -14,11 +14,13 @@
 		BreathingTechnique: "Breathing Styles",
 		CursedTechnique: "Cursed Techniques",
 		Fruit: "Fruits",
+		Grimoire: "Grimoires",
 		Kagune: "Kagunes",
 		Other: "Other",
 		Permanent: "Permanent",
 		Reiatsu: "Reiatsu",
 		Stand: "Stands",
+		Superpower: "Superpowers",
 	};
 	const STAT_FOLDERS = ["Strength", "Chakra", "Sword", "Speed", "Agility"];
 	const STAT_TYPES = ["Strength", "Chakra", "Sword"];
@@ -824,7 +826,7 @@
 
 			<h2>2. Finding a move</h2>
 			<ul>
-				<li>The list is grouped into <b>Powers</b> (Strength, Chakra, Sword, Speed, Agility) and <b>Specials</b> (Authorities, Bloodlines, Breathing Styles, Cursed Techniques, Fruits, Kagunes, Permanent, Reiatsu, Stands). Each special expands into its Z / X / C / V abilities, with the move's icon (or the special's icon when the move has none).</li>
+				<li>The list is grouped into <b>Powers</b> (Strength, Chakra, Sword, Speed, Agility) and <b>Specials</b> (Authorities, Bloodlines, Breathing Styles, Cursed Techniques, Fruits, Grimoires, Kagunes, Permanent, Reiatsu, Stands, Superpowers). Each special expands into its Z / X / C / V abilities, with the move's icon (or the special's icon when the move has none).</li>
 				<li>Stand moves that are shared between stands (barrages, Timestop) appear once per stand with that stand's own damage and cooldown values.</li>
 				<li>The search box matches move names, special names and scaling types. <b>Hide non-damaging moves</b> removes buffs, dashes and transformations from the list. A coloured dot marks moves that carry rebalance overrides.</li>
 			</ul>

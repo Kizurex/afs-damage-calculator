@@ -7,11 +7,14 @@
 		Bloodlines: "BloodlineDamage",
 		CursedTechniques: "CurseTechniqueDamage",
 		Fruits: "FruitDamage",
+		Grimoires: "GrimoireDamage",
 		Kagunes: "KaguneDamage",
 		Reiatsu: "ReiatsuDamage",
 		Stands: "StandDamage",
+		Superpowers: "SuperpowerDamage",
 	};
-	const SPECIAL_TYPES = ["Authorities", "Bloodlines", "BreathingStyles", "CursedTechniques", "Fruits", "Kagunes", "Permanent", "Reiatsu", "Stands"];
+	const SPECIAL_ID_TITLE_EFFECT = { WeaponSpecialist: "WeaponSpecialistDamage" };
+	const SPECIAL_TYPES = ["Authorities", "Bloodlines", "BreathingStyles", "CursedTechniques", "Fruits", "Grimoires", "Kagunes", "Permanent", "Reiatsu", "Stands", "Superpowers"];
 	const CUSTOM_ID = "__custom";
 
 	const MOVE_BLEED = { damageBoostPerStack: 0.02, decayInterval: 2, detonationMultiplier: 0.5, maxStacks: 30 };
@@ -374,6 +377,10 @@
 			if (statEffect && typeof title.effects[statEffect] === "number") apply(`Title ${title.displayName}: ${move.statType} damage`, title.effects[statEffect], "title");
 			const specialEffect = SPECIAL_TITLE_EFFECT[move.specialType];
 			if (specialEffect && typeof title.effects[specialEffect] === "number") apply(`Title ${title.displayName}: ${move.specialType} damage`, title.effects[specialEffect], "title");
+			for (const specialId of new Set((move.usedBy || []).map((u) => u.specialId))) {
+				const idEffect = SPECIAL_ID_TITLE_EFFECT[specialId];
+				if (idEffect && typeof title.effects[idEffect] === "number") apply(`Title ${title.displayName}: ${specialId} damage`, title.effects[idEffect], "title");
+			}
 		}
 
 		return { steps, champion, boosts, accessories, title, attackerHealthRatio };
@@ -547,7 +554,10 @@
 			if (basis === "none") continue;
 			const count = Math.max(0, num(hit.count, 0));
 			let perHit;
-			if (loadout.mode === "duel" || loadout.mode === "boss") {
+			const bossValue = hit.damage && hit.damage.bossValue;
+			if (loadout.mode === "boss" && typeof bossValue === "number" && num(move.bossDamage, 1) > 0) {
+				perHit = perHitFull * (bossValue / num(move.bossDamage, 1));
+			} else if (loadout.mode === "duel" || loadout.mode === "boss") {
 				perHit = perHitFull;
 			} else {
 				const multiplier = num(hit.damage && hit.damage.multiplier, 1);
